@@ -1,0 +1,11 @@
+com\airecorder\api\HttpApiServer$1.class
+com\airecorder\core\ScreenRecorder.class
+com\airecorder\gui\RecorderGui.class
+com\airecorder\core\RecorderService.class
+com\airecorder\RecorderApplication.class
+com\airecorder\api\HttpApiServer$ThrowingHandler.class
+com\airecorder\core\RecorderState.class
+com\airecorder\config\RecorderConfig.class
+com\airecorder\api\HttpApiServer$StartHandler.class
+com\airecorder\cli\CliLauncher.class
+com\airecorder\api\HttpApiServer.class
