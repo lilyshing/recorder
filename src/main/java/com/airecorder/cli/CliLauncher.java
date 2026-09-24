@@ -173,6 +173,13 @@ public class CliLauncher {
         if (opts.containsKey("bitrate")) {
             config.setVideoBitrate(RecorderConfig.parseBitrate(opts.get("bitrate")));
         }
+        // 自动分段开关与阈值
+        if (opts.containsKey("segment")) {
+            config.setSegmentEnabled(Boolean.parseBoolean(opts.get("segment")));
+        }
+        if (opts.containsKey("segment-size")) {
+            config.setSegmentSizeBytes(RecorderConfig.parseSize(opts.get("segment-size")));
+        }
         return config;
     }
 
@@ -256,6 +263,8 @@ public class CliLauncher {
         System.out.println("  --resolution <WxH>   分辨率，如 1920x1080，默认屏幕分辨率");
         System.out.println("  --output <path>      输出 mp4 文件路径，默认当前目录");
         System.out.println("  --bitrate <V>        视频码率，如 8M/8000k/8000000，默认 8M");
+        System.out.println("  --segment <bool>    启用按大小自动分段，true/false，默认 false");
+        System.out.println("  --segment-size <V>  分段阈值，如 20M/20480K/20971520，默认 20M");
         System.out.println("  --port <N>           HTTP API 端口，默认 " + DEFAULT_PORT);
         System.out.println("");
         System.out.println("HTTP API (无界面模式启动后可用):");

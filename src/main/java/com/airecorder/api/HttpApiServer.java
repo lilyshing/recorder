@@ -167,6 +167,13 @@ public class HttpApiServer {
                 if (params.containsKey("bitrate")) {
                     config.setVideoBitrate(RecorderConfig.parseBitrate(params.get("bitrate")));
                 }
+                // 自动分段：segment=true&segmentSize=20M
+                if (params.containsKey("segment")) {
+                    config.setSegmentEnabled(Boolean.parseBoolean(params.get("segment")));
+                }
+                if (params.containsKey("segmentSize")) {
+                    config.setSegmentSizeBytes(RecorderConfig.parseSize(params.get("segmentSize")));
+                }
                 service.start(config);
                 sendJson(exchange, 200, statusJson());
             } catch (Throwable t) {
@@ -190,7 +197,10 @@ public class HttpApiServer {
             sb.append(",\"config\":{\"fps\":").append(c.getFps())
                     .append(",\"width\":").append(a.width)
                     .append(",\"height\":").append(a.height)
-                    .append(",\"bitrate\":").append(c.getVideoBitrate()).append("}");
+                    .append(",\"bitrate\":").append(c.getVideoBitrate())
+                    .append(",\"segmentEnabled\":").append(c.isSegmentEnabled())
+                    .append(",\"segmentSize\":").append(c.getSegmentSizeBytes())
+                    .append("}");
         }
         sb.append("}");
         return sb.toString();

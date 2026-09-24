@@ -6,6 +6,7 @@ import com.airecorder.core.RecorderState;
 import com.airecorder.core.ScreenRecorder;
 
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
@@ -39,6 +40,10 @@ public class RecorderGui {
     private JTextField outputField;
     /** 视频码率输入框 */
     private JTextField bitrateField;
+    /** 自动分段开关(默认不勾选) */
+    private JCheckBox segmentCheckbox;
+    /** 分段阈值输入框(如 20M) */
+    private JTextField segmentSizeField;
     /** 开始按钮 */
     private JButton startBtn;
     /** 暂停/恢复按钮 */
@@ -64,11 +69,11 @@ public class RecorderGui {
     private void buildFrame() {
         frame = new JFrame("屏幕录像");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(520, 260);
+        frame.setSize(520, 300);
         frame.setLocationRelativeTo(null);
 
         // 配置面板
-        JPanel configPanel = new JPanel(new GridLayout(4, 2, 8, 8));
+        JPanel configPanel = new JPanel(new GridLayout(5, 2, 8, 8));
         configPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
 
         configPanel.add(new JLabel("帧率 (30fps):"));
@@ -91,6 +96,16 @@ public class RecorderGui {
         outPanel.add(outputField, BorderLayout.CENTER);
         outPanel.add(browseBtn, BorderLayout.EAST);
         configPanel.add(outPanel);
+
+        configPanel.add(new JLabel("自动分段 (按大小):"));
+        JPanel segPanel = new JPanel(new BorderLayout(4, 0));
+        // checkbox 默认不勾选，分段阈值输入框默认 20M
+        segmentCheckbox = new JCheckBox("启用");
+        segmentCheckbox.setSelected(false);
+        segmentSizeField = new JTextField("20M");
+        segPanel.add(segmentCheckbox, BorderLayout.WEST);
+        segPanel.add(segmentSizeField, BorderLayout.CENTER);
+        configPanel.add(segPanel);
 
 
 
@@ -156,6 +171,12 @@ public class RecorderGui {
         String br = bitrateField.getText().trim();
         if (!br.isEmpty()) {
             config.setVideoBitrate(RecorderConfig.parseBitrate(br));
+        }
+        // 自动分段：checkbox 开关 + 大小输入框
+        config.setSegmentEnabled(segmentCheckbox.isSelected());
+        String segSize = segmentSizeField.getText().trim();
+        if (!segSize.isEmpty()) {
+            config.setSegmentSizeBytes(RecorderConfig.parseSize(segSize));
         }
         return config;
     }

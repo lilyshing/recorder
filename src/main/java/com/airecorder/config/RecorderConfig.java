@@ -19,6 +19,8 @@ public class RecorderConfig {
     public static final int DEFAULT_API_PORT = 8080;
     /** 默认视频码率 8Mbps(8000000bps)，1080p 清晰 */
     public static final int DEFAULT_VIDEO_BITRATE = 8_000_000;
+    /** 默认分段阈值 20MB(20*1024*1024 字节)，启用分段后单文件超过此大小自动切片 */
+    public static final long DEFAULT_SEGMENT_SIZE_BYTES = 20L * 1024 * 1024;
 
     /** 帧率(fps) */
     private int fps = DEFAULT_FPS;
@@ -30,6 +32,10 @@ public class RecorderConfig {
     private int apiPort = DEFAULT_API_PORT;
     /** 视频码率(bps) */
     private int videoBitrate = DEFAULT_VIDEO_BITRATE;
+    /** 是否启用按大小自动分段，默认 false 需用户主动开启 */
+    private boolean segmentEnabled = false;
+    /** 分段阈值(字节)，segmentEnabled=true 时生效，默认 20MB */
+    private long segmentSizeBytes = DEFAULT_SEGMENT_SIZE_BYTES;
 
     /** 默认构造器：输出文件采用带时间戳的默认路径 */
     public RecorderConfig() {
@@ -136,6 +142,42 @@ public class RecorderConfig {
         return this;
     }
 
+    /** 是否启用按大小自动分段 */
+    public boolean isSegmentEnabled() {
+        return segmentEnabled;
+    }
+
+    /**
+     * 设置是否启用按大小自动分段。
+     *
+     * @param segmentEnabled true 启用，false 关闭
+     * @return 当前配置对象（链式调用）
+     */
+    public RecorderConfig setSegmentEnabled(boolean segmentEnabled) {
+        this.segmentEnabled = segmentEnabled;
+        return this;
+    }
+
+    /** 获取分段阈值(字节) */
+    public long getSegmentSizeBytes() {
+        return segmentSizeBytes;
+    }
+
+    /**
+     * 设置分段阈值(字节)。
+     *
+     * @param segmentSizeBytes 阈值字节数，必须大于 0
+     * @return 当前配置对象（链式调用）
+     * @throws IllegalArgumentException 当阈值小于等于 0
+     */
+    public RecorderConfig setSegmentSizeBytes(long segmentSizeBytes) {
+        if (segmentSizeBytes <= 0) {
+            throw new IllegalArgumentException("segmentSizeBytes 必须大于 0，实际: " + segmentSizeBytes);
+        }
+        this.segmentSizeBytes = segmentSizeBytes;
+        return this;
+    }
+
     /** 计算实际录制区域：未指定则取主屏幕全屏 */
     public Rectangle resolveCaptureArea() {
         if (captureArea != null) {
@@ -198,7 +240,40 @@ public class RecorderConfig {
         }
     }
 
-    /** 输出配置摘要字符串，包含帧率/分辨率/码率/输出路径/端口 */
+    /**
+     * 解析文件大小字符串为字节数，支持 "20M"/"20480K"/"20971520"。
+     * <p>注意：此处采用二进制单位——K=1024、M=1024×1024，符合"文件大小"习惯；
+     * 与 {@link #parseBitrate(String)} 的十进制单位(1000/1_000_000)有意区分。
+     *
+     * @param s 大小字符串，null 或空返回默认分段阈值
+     * @return 字节数
+     * @throws IllegalArgumentException 格式错误或数值非正
+     */
+    public static long parseSize(String s) {
+        if (s == null || s.trim().isEmpty()) {
+            return DEFAULT_SEGMENT_SIZE_BYTES;
+        }
+        String t = s.trim().toLowerCase();
+        long mult = 1;
+        if (t.endsWith("k")) {
+            mult = 1024L;
+            t = t.substring(0, t.length() - 1);
+        } else if (t.endsWith("m")) {
+            mult = 1024L * 1024L;
+            t = t.substring(0, t.length() - 1);
+        }
+        try {
+            long val = (long) Double.parseDouble(t) * mult;
+            if (val <= 0) {
+                throw new IllegalArgumentException("大小数值无效: " + s);
+            }
+            return val;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("大小格式错误，应为 20M/20480K/20971520，实际: " + s);
+        }
+    }
+
+    /** 输出配置摘要字符串，包含帧率/分辨率/码率/输出路径/端口/分段 */
     @Override
     public String toString() {
         Rectangle a = resolveCaptureArea();
@@ -206,6 +281,8 @@ public class RecorderConfig {
                 + ", area=" + a.width + "x" + a.height
                 + ", bitrate=" + videoBitrate + "bps"
                 + ", output=" + (outputFile == null ? "null" : outputFile.getAbsolutePath())
-                + ", apiPort=" + apiPort + "}";
+                + ", apiPort=" + apiPort
+                + ", segment=" + (segmentEnabled ? "enabled" : "off")
+                + ", segmentSize=" + segmentSizeBytes + "B}";
     }
 }

@@ -48,6 +48,11 @@ public class ScreenRecorder implements RecorderService {
     /** 暂停标志，true 时采集线程跳过编码 */
     private volatile boolean paused = false;
 
+    /** 当前段序号，0 表示用户指定的原输出文件(第 0 段) */
+    private volatile int segmentIndex = 0;
+    /** 当前正在写入的段文件，分段轮转时切换 */
+    private volatile File currentSegmentFile;
+
     /**
      * 以给定配置开始录制。
      * <p>流程：校验状态 -> 创建 Robot -> 初始化 FFmpeg 编码器 -> 启动采集线程。
@@ -104,6 +109,9 @@ public class ScreenRecorder implements RecorderService {
             // 直接 convert 会与 FFmpeg 期望的 BGR 字节序不匹配导致红蓝颠倒偏色
             bgrImage = new BufferedImage(area.width, area.height, BufferedImage.TYPE_3BYTE_BGR);
             lastOutputFile = out;
+            // 分段初始化：第 0 段即用户指定输出文件
+            currentSegmentFile = out;
+            segmentIndex = 0;
 
             running = true;
             paused = false;
@@ -129,6 +137,10 @@ public class ScreenRecorder implements RecorderService {
             Rectangle area = currentConfig.resolveCaptureArea();
             long frameIntervalNanos = 1_000_000_000L / currentConfig.getFps();
             long nextFrameTime = System.nanoTime();
+            // 分段大小检查的帧间隔：取用户配置的帧率，约每秒检查一次，避免每帧 IO 查询
+            int segmentCheckInterval = Math.max(1, currentConfig.getFps());
+            // 本地帧计数器，用于按间隔触发分段大小检查
+            int frameCounter = 0;
 
             while (running) {
                 boolean localPaused = paused;
@@ -143,6 +155,11 @@ public class ScreenRecorder implements RecorderService {
                         synchronized (lock) {
                             if (recorder != null && running && !paused) {
                                 recorder.record(frame);
+                                // 按配置帧率间隔检查当前段文件大小，超阈值则轮转
+                                if (++frameCounter >= segmentCheckInterval) {
+                                    frameCounter = 0;
+                                    checkAndRotate();
+                                }
                             }
                         }
                     }
@@ -239,6 +256,96 @@ public class ScreenRecorder implements RecorderService {
         }
         System.out.println("[Recorder] 已停止，输出文件: "
                 + (lastOutputFile != null ? lastOutputFile.getAbsolutePath() : "无"));
+    }
+
+    /**
+     * 检查当前段文件大小，超阈值则触发分段轮转。
+     * <p>必须在 synchronized(lock) 块内调用：读取 currentSegmentFile 大小，
+     * 若超过 {@link RecorderConfig#getSegmentSizeBytes()} 且分段已启用，则调用 {@link #rotateSegment()}。
+     * 未启用分段、已停止或编码器为空时直接返回。
+     */
+    private void checkAndRotate() {
+        if (!running || recorder == null || currentConfig == null) {
+            return;
+        }
+        if (!currentConfig.isSegmentEnabled()) {
+            return;
+        }
+        File seg = currentSegmentFile;
+        if (seg == null) {
+            return;
+        }
+        long size = seg.length();
+        if (size < currentConfig.getSegmentSizeBytes()) {
+            return;
+        }
+        rotateSegment(size);
+    }
+
+    /**
+     * 执行分段轮转：关闭旧编码器(完成 MP4 封装)，创建新文件与新编码器，继续录制。
+     * <p>必须在 synchronized(lock) 块内调用。流程：
+     * <ol>
+     *   <li>stop+release 旧 recorder，异常仅打印不中断</li>
+     *   <li>segmentIndex++，按 原名_&lt;N&gt;.mp4 规则生成新文件</li>
+     *   <li>用相同编码参数初始化新 FFmpegFrameRecorder 并 start</li>
+     *   <li>更新 currentSegmentFile / lastOutputFile</li>
+     * </ol>
+     * 新编码器启动失败时置 state=ERROR，由 captureLoop 退出走 finally。
+     *
+     * @param oldSize 触发轮转时旧段文件大小(字节)，仅用于日志
+     */
+    private void rotateSegment(long oldSize) {
+        // 1. 关闭旧 recorder，完成旧段 MP4 封装
+        FFmpegFrameRecorder old = recorder;
+        recorder = null;
+        if (old != null) {
+            try {
+                old.stop();
+                old.release();
+            } catch (org.bytedeco.javacv.FrameRecorder.Exception e) {
+                System.err.println("[Recorder] 分段关闭旧编码器失败: " + e.getMessage());
+            }
+        }
+
+        // 2. 计算新段文件名：原名_<N>.mp4
+        File orig = currentConfig.getOutputFile() != null
+                ? currentConfig.getOutputFile()
+                : lastOutputFile;
+        String name = orig.getName();
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        String ext = dot > 0 ? name.substring(dot) : ".mp4";
+        File parent = orig.getParentFile();
+        if (parent == null) {
+            parent = new File(System.getProperty("user.dir"));
+        }
+        segmentIndex++;
+        File newFile = new File(parent, base + "_" + segmentIndex + ext);
+
+        // 3. 用相同编码参数初始化新 recorder
+        Rectangle area = currentConfig.resolveCaptureArea();
+        FFmpegFrameRecorder newRecorder = new FFmpegFrameRecorder(newFile, area.width, area.height);
+        newRecorder.setFormat("mp4");
+        newRecorder.setVideoCodecName("libx264");
+        newRecorder.setFrameRate(currentConfig.getFps());
+        newRecorder.setVideoBitrate(currentConfig.getVideoBitrate());
+        newRecorder.setVideoOption("pix_fmt", "yuv420p");
+        newRecorder.setVideoOption("preset", "veryfast");
+        try {
+            newRecorder.start();
+        } catch (org.bytedeco.javacv.FrameRecorder.Exception e) {
+            System.err.println("[Recorder] 分段启动新编码器失败: " + e.getMessage());
+            e.printStackTrace();
+            state = RecorderState.ERROR;
+            running = false;
+            return;
+        }
+        recorder = newRecorder;
+        currentSegmentFile = newFile;
+        lastOutputFile = newFile;
+        System.out.println("[Recorder] 分段切换 -> " + newFile.getAbsolutePath()
+                + " (上一段 " + oldSize + " bytes)");
     }
 
     /**

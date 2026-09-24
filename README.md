@@ -9,12 +9,13 @@
 - **双模式运行**
   - 有界面模式：Swing 窗口，开始/暂停/停止按钮 + 配置面板
   - 无界面模式：命令行启动后台录制，同时暴露 HTTP API 供停止/状态查询
-- **可配置项**：帧率、分辨率、输出路径、视频码率、HTTP API 端口
+- **可配置项**：帧率、分辨率、输出路径、视频码率、HTTP API 端口、自动分段
 - **外部 API**：
   - HTTP REST API（`start` / `pause` / `resume` / `stop` / `status`）
   - Java 编程式 API（`RecorderService` 接口，进程内直接调用）
 - **颜色正确**：强制 `TYPE_3BYTE_BGR` 中转，避免 Windows 下 R/B 通道颠倒偏色
 - **状态机**：`IDLE → RECORDING → PAUSED → IDLE`，线程安全
+- **自动分段**：可按文件大小自动切片（默认 20MB），生成 `原名.mp4` / `原名_1.mp4` / `原名_2.mp4` ...，每段均可独立播放
 
 ## 技术栈
 
@@ -73,8 +74,8 @@ java -jar target/recorder.jar gui
 ### 无界面模式（命令行 + HTTP API）
 
 ```bash
-# 后台开始录制（同时监听 HTTP API）
-java -jar target/recorder.jar start --fps 30 --resolution 1920x1080 --bitrate 8M --output out.mp4
+# 后台开始录制（同时监听 HTTP API），启用 20MB 自动分段
+java -jar target/recorder.jar start --fps 30 --resolution 1920x1080 --bitrate 8M --output out.mp4 --segment true --segment-size 20M
 
 # 查询状态
 java -jar target/recorder.jar status
@@ -91,8 +92,8 @@ java -jar target/recorder.jar api
 无界面模式启动后默认监听 `http://localhost:8080`：
 
 ```bash
-# 开始录制（参数均可选）
-curl -X POST "http://localhost:8080/api/recorder/start?fps=30&width=1920&height=1080&bitrate=8M&output=out.mp4"
+# 开始录制（参数均可选），启用 20MB 自动分段
+curl -X POST "http://localhost:8080/api/recorder/start?fps=30&width=1920&height=1080&bitrate=8M&output=out.mp4&segment=true&segmentSize=20M"
 
 # 暂停 / 恢复
 curl -X POST http://localhost:8080/api/recorder/pause
@@ -107,7 +108,7 @@ curl http://localhost:8080/api/recorder/status
 
 响应示例：
 ```json
-{"ok":true,"state":"RECORDING","outputFile":"D:\\...\\out.mp4","config":{"fps":30,"width":1920,"height":1080,"bitrate":8000000}}
+{"ok":true,"state":"RECORDING","outputFile":"D:\\...\\out.mp4","config":{"fps":30,"width":1920,"height":1080,"bitrate":8000000,"segmentEnabled":true,"segmentSize":20971520}}
 ```
 
 ### Java 编程式 API（进程内调用）
@@ -118,13 +119,15 @@ RecorderConfig config = new RecorderConfig()
         .setFps(30)
         .setResolution(1920, 1080)
         .setVideoBitrate(8_000_000)
-        .setOutputFile(new File("out.mp4"));
+        .setOutputFile(new File("out.mp4"))
+        .setSegmentEnabled(true)                  // 启用自动分段
+        .setSegmentSizeBytes(20L * 1024 * 1024);  // 阈值 20MB
 service.start(config);   // 开始
 service.pause();        // 暂停
 service.resume();       // 恢复
 service.stop();         // 停止并完成 MP4 封装
 service.getState();     // 获取状态
-service.getLastOutputFile(); // 获取输出文件
+service.getLastOutputFile(); // 获取当前段输出文件
 ```
 
 ## 配置参数
@@ -135,9 +138,12 @@ service.getLastOutputFile(); // 获取输出文件
 | 分辨率 | `--resolution <WxH>` | `width`+`height` | 屏幕分辨率 |
 | 视频码率 | `--bitrate <V>` | `bitrate` | 8M (8000000 bps) |
 | 输出路径 | `--output <path>` | `output` | 当前目录 `recording_<时间戳>.mp4` |
+| 自动分段开关 | `--segment <bool>` | `segment` | false |
+| 分段阈值 | `--segment-size <V>` | `segmentSize` | 20M (20971520 字节) |
 | API 端口 | `--port <N>` | — | 8080 |
 
 码率格式支持：`8M` / `8000k` / `8000000`（单位 bps）。
+分段大小格式支持：`20M` / `20480K` / `20971520`（单位字节，K=1024、M=1024×1024）。
 
 ## 命令一览
 
@@ -173,3 +179,11 @@ A: 有录制进程仍在运行并持有 jar 文件锁。先执行 `java -jar tar
 
 **Q: 录制帧率达不到设定值？**
 A: 高分辨率 + 高码率 + 高帧率对 CPU 压力大。可降低分辨率/帧率，或在更快的机器上运行。
+
+**Q: 如何按大小自动分段（避免单文件过大）？**
+A: 启用分段后，单文件超过阈值（默认 20MB）会自动切换到新文件继续录制，旧文件完成 MP4 封装仍可独立播放。
+- GUI：勾选"自动分段"，输入阈值（如 `20M`）
+- CLI：`--segment true --segment-size 20M`
+- HTTP：`?segment=true&segmentSize=20M`
+- 文件命名：`out.mp4` → `out_1.mp4` → `out_2.mp4` ...
+- 编程式：`config.setSegmentEnabled(true).setSegmentSizeBytes(20L * 1024 * 1024)`
