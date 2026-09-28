@@ -1,5 +1,6 @@
 package com.airecorder;
 
+import com.aipro.upgrade.client.UpgradeClient;
 import com.airecorder.cli.CliLauncher;
 import com.airecorder.gui.RecorderGui;
 
@@ -29,6 +30,8 @@ public class RecorderApplication {
      * @param args 命令行参数数组，可为空
      */
     public static void main(String[] args) {
+        // 检查并升级
+        UpgradeClient.getInstance().checkAndUpgrade();
         // 无参数或 gui -> 启动 GUI
         if (args.length == 0 || "gui".equalsIgnoreCase(args[0])) {
             new RecorderGui().show();

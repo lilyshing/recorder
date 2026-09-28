@@ -40,11 +40,47 @@
             <version>6.1.1-1.5.10</version>
             <classifier>windows-x86_64</classifier>
         </dependency>
+        <!-- 本地升级客户端 jar：system 作用域仅保证编译期可见；
+             打包时由 maven-dependency-plugin 解压到 target/classes，再由 shade 打入 fat jar -->
+        <dependency>
+            <groupId>com.aipro</groupId>
+            <artifactId>upgrade-client</artifactId>
+            <version>1.0.0</version>
+            <systemPath>${project.basedir}/lib/upgrade-client.jar</systemPath>
+            <scope>system</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
         <finalName>recorder</finalName>
         <plugins>
+            <!-- 把 system 作用域的 upgrade-client.jar 直接解压到 target/classes，
+                 使其作为项目输出被 maven-shade-plugin 打入 fat jar（shade 默认不包含 system 依赖） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>3.1.0</version>
+                <executions>
+                    <execution>
+                        <id>unpack-upgrade-client</id>
+                        <phase>prepare-package</phase>
+                        <goals>
+                            <goal>run</goal>
+                        </goals>
+                        <configuration>
+                            <target>
+                                <unzip src="${project.basedir}/lib/upgrade-client.jar"
+                                       dest="${project.build.outputDirectory}">
+                                    <patternset>
+                                        <exclude name="META-INF/MANIFEST.MF"/>
+                                    </patternset>
+                                </unzip>
+                            </target>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <!-- 打成可执行 fat jar，包含所有依赖与原生库 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
