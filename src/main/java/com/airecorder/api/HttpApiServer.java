@@ -1,6 +1,8 @@
 package com.airecorder.api;
 
 import com.airecorder.config.RecorderConfig;
+import com.airecorder.config.VideoCodec;
+import com.airecorder.core.CodecSupport;
 import com.airecorder.core.RecorderService;
 import com.airecorder.core.RecorderState;
 import com.sun.net.httpserver.HttpExchange;
@@ -20,7 +22,8 @@ import java.util.Map;
  * 包装 RecorderService，对外暴露 start/pause/resume/stop/status。
  *
  * 路由：
- *   POST /api/recorder/start?fps=30&width=1920&height=1080&output=<path>
+ *   POST /api/recorder/start?fps=30&codec=h265&width=1920&height=1080&output=<path>
+ *   GET  /api/recorder/capabilities  查询本机支持的视频编码(h264/h265)
  *   POST /api/recorder/pause
  *   POST /api/recorder/resume
  *   POST /api/recorder/stop
@@ -68,6 +71,7 @@ public class HttpApiServer {
     public void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/api/recorder/start", new StartHandler());
+        server.createContext("/api/recorder/capabilities", new CapabilitiesHandler());
         server.createContext("/api/recorder/pause", wrap(ex -> {
             service.pause();
             return null;
@@ -139,8 +143,10 @@ public class HttpApiServer {
     private class StartHandler implements HttpHandler {
         /**
          * 处理 start 请求。
-         * <p>从 query 解析 fps/width/height/output/bitrate，构造 {@link RecorderConfig}
+         * <p>从 query 解析 fps/codec/width/height/output/bitrate，构造 {@link RecorderConfig}
          * 调用 service.start，成功返回状态 JSON，失败返回 500 错误。
+         * 选择了当前环境不支持的编码(如 codec=h265 但无 libx265)时，由 service.start
+         * 抛出异常，响应体中携带明确的不支持提示。
          *
          * @param exchange HTTP 交换对象
          * @throws IOException 写响应时发生 I/O 错误
@@ -156,6 +162,10 @@ public class HttpApiServer {
                 RecorderConfig config = new RecorderConfig();
                 if (params.containsKey("fps")) {
                     config.setFps(Integer.parseInt(params.get("fps")));
+                }
+                // 视频编码：h264(默认)/h265，也兼容 h.265/hevc/libx265 等写法
+                if (params.containsKey("codec")) {
+                    config.setVideoCodec(VideoCodec.parse(params.get("codec")));
                 }
                 if (params.containsKey("width") && params.containsKey("height")) {
                     config.setResolution(Integer.parseInt(params.get("width")),
@@ -182,6 +192,54 @@ public class HttpApiServer {
         }
     }
 
+    /** capabilities 处理器：返回本机 FFmpeg 环境支持的视频编码列表 */
+    private class CapabilitiesHandler implements HttpHandler {
+        /**
+         * 处理能力查询请求（仅支持 GET）。
+         *
+         * @param exchange HTTP 交换对象
+         * @throws IOException 写响应时发生 I/O 错误
+         */
+        @Override
+        public void handle(HttpExchange exchange) throws IOException {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, errorJson("仅支持 GET"));
+                return;
+            }
+            sendJson(exchange, 200, capabilitiesJson());
+        }
+    }
+
+    /** 构造编码能力 JSON：列出 h264/h265 是否可用、实际选中的编码器及候选列表 */
+    private String capabilitiesJson() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"ok\":true,\"codecs\":[");
+        VideoCodec[] codecs = VideoCodec.values();
+        for (int i = 0; i < codecs.length; i++) {
+            VideoCodec c = codecs[i];
+            if (i > 0) {
+                sb.append(",");
+            }
+            // resolveEncoder 会对候选编码器做运行期试打开并缓存，可能耗时数百毫秒
+            String encoder = CodecSupport.resolveEncoder(c);
+            sb.append("{\"name\":\"").append(c.name())
+                    .append("\",\"displayName\":\"").append(c.getDisplayName())
+                    .append("\",\"supported\":").append(encoder != null)
+                    .append(",\"encoder\":\"").append(encoder == null ? "" : encoder)
+                    .append("\",\"candidates\":[");
+            String[] candidates = c.getCandidates();
+            for (int j = 0; j < candidates.length; j++) {
+                if (j > 0) {
+                    sb.append(",");
+                }
+                sb.append("\"").append(candidates[j]).append("\"");
+            }
+            sb.append("]}");
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
     /** 构造当前状态 JSON 字符串，包含 state/outputFile/config 等字段 */
     private String statusJson() {
         RecorderState s = service.getState();
@@ -194,7 +252,8 @@ public class HttpApiServer {
         }
         if (c != null) {
             java.awt.Rectangle a = c.resolveCaptureArea();
-            sb.append(",\"config\":{\"fps\":").append(c.getFps())
+            sb.append(",\"config\":{\"codec\":\"").append(c.getVideoCodec().name())
+                    .append("\",\"fps\":").append(c.getFps())
                     .append(",\"width\":").append(a.width)
                     .append(",\"height\":").append(a.height)
                     .append(",\"bitrate\":").append(c.getVideoBitrate())

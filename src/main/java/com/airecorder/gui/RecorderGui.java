@@ -1,12 +1,15 @@
 package com.airecorder.gui;
 
 import com.airecorder.config.RecorderConfig;
+import com.airecorder.config.VideoCodec;
+import com.airecorder.core.CodecSupport;
 import com.airecorder.core.RecorderService;
 import com.airecorder.core.RecorderState;
 import com.airecorder.core.ScreenRecorder;
 
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
 import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
@@ -40,6 +43,8 @@ public class RecorderGui {
     private JTextField outputField;
     /** 视频码率输入框 */
     private JTextField bitrateField;
+    /** 视频编码下拉框：H.264 / H.265 */
+    private JComboBox<String> codecCombo;
     /** 自动分段开关(默认不勾选) */
     private JCheckBox segmentCheckbox;
     /** 分段阈值输入框(如 20M) */
@@ -69,16 +74,42 @@ public class RecorderGui {
     private void buildFrame() {
         frame = new JFrame("屏幕录像");
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(520, 300);
+        frame.setSize(520, 340);
         frame.setLocationRelativeTo(null);
 
-        // 配置面板
-        JPanel configPanel = new JPanel(new GridLayout(5, 2, 8, 8));
+        // 配置面板：帧率/编码/码率/分辨率/输出/分段 共 6 行
+        JPanel configPanel = new JPanel(new GridLayout(6, 2, 8, 8));
         configPanel.setBorder(new EmptyBorder(10, 10, 10, 10));
 
         configPanel.add(new JLabel("帧率 (30fps):"));
         fpsField = new JTextField(String.valueOf(RecorderConfig.DEFAULT_FPS));
         configPanel.add(fpsField);
+
+        configPanel.add(new JLabel("视频编码:"));
+        // 下拉框顺序固定：下标 0=H.264，下标 1=H.265；H.265 不支持时在文案中注明
+        codecCombo = new JComboBox<String>(new String[]{
+                VideoCodec.H264.getDisplayName(),
+                VideoCodec.H265.getDisplayName()
+        });
+        codecCombo.setSelectedIndex(0);
+        codecCombo.addActionListener(e -> onCodecChanged());
+        configPanel.add(codecCombo);
+        // 后台预热编码能力探测（首次需加载 FFmpeg 原生库），完成后刷新 H.265 选项文案
+        Thread warmup = new Thread(() -> {
+            boolean h265Ok = CodecSupport.isSupported(VideoCodec.H265);
+            SwingUtilities.invokeLater(() -> {
+                if (codecCombo != null) {
+                    // JDK8 无 setItemAt：先在位置 1 插入带标注的新文案，再删除被挤到位置 2 的旧项
+                    String label = VideoCodec.H265.getDisplayName() + (h265Ok ? "" : " (本机不支持)");
+                    javax.swing.MutableComboBoxModel<String> model =
+                            (javax.swing.MutableComboBoxModel<String>) codecCombo.getModel();
+                    model.insertElementAt(label, 1);
+                    model.removeElementAt(2);
+                }
+            });
+        }, "codec-probe");
+        warmup.setDaemon(true);
+        warmup.start();
 
         configPanel.add(new JLabel("码率 (如8M):"));
         bitrateField = new JTextField("2M");
@@ -146,7 +177,30 @@ public class RecorderGui {
         }
     }
 
-    /** 从表单输入构造录制配置：解析帧率/分辨率/输出路径/码率，失败时抛出 IllegalArgumentException */
+    /**
+     * 编码下拉框切换回调：用户选择 H.265 时做运行期能力探测，
+     * 若当前 FFmpeg 环境不含 libx265，弹窗提示并自动回退到 H.264。
+     */
+    private void onCodecChanged() {
+        // 下标 1 固定对应 H.265
+        if (codecCombo.getSelectedIndex() != 1) {
+            return;
+        }
+        if (CodecSupport.isSupported(VideoCodec.H265)) {
+            return;
+        }
+        JOptionPane.showMessageDialog(frame,
+                "当前运行环境没有可用的 H.265(HEVC) 编码器。\n\n"
+                        + "已尝试: " + String.join("、", VideoCodec.H265.getCandidates()) + "\n"
+                        + "可能原因：FFmpeg 未内置 libx265、无 NVIDIA/Intel 硬件编码，\n"
+                        + "或系统未安装 HEVC 视频扩展（Win7 不提供该组件）。\n\n"
+                        + "请继续使用 H.264，或在支持 H.265 的环境中运行。",
+                "H.265 不可用", JOptionPane.WARNING_MESSAGE);
+        // 回退到 H.264（setSelectedIndex 会再次触发本回调，下标 0 直接返回，无递归风险）
+        codecCombo.setSelectedIndex(0);
+    }
+
+    /** 从表单输入构造录制配置：解析帧率/编码/分辨率/输出路径/码率，失败时抛出 IllegalArgumentException */
     private RecorderConfig buildConfigFromForm() {
         RecorderConfig config = new RecorderConfig();
         try {
@@ -157,6 +211,9 @@ public class RecorderGui {
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException("帧率必须为整数");
         }
+        // 下拉框下标：0=H.264，1=H.265（文案可能带"本机不支持"后缀，故只用下标映射）
+        config.setVideoCodec(codecCombo.getSelectedIndex() == 1
+                ? VideoCodec.H265 : VideoCodec.H264);
         String res = resolutionField.getText().trim();
         if (!res.isEmpty()) {
             int[] wh = RecorderConfig.parseResolution(res);

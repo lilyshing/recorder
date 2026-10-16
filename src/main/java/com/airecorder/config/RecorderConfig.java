@@ -17,10 +17,12 @@ public class RecorderConfig {
     public static final int DEFAULT_FPS = 30;
     /** 默认 HTTP API 端口 */
     public static final int DEFAULT_API_PORT = 8080;
-    /** 默认视频码率 8Mbps(8000000bps)，1080p 清晰 */
-    public static final int DEFAULT_VIDEO_BITRATE = 8_000_000;
+    /** 默认视频码率 4Mbps(4000000bps)，CLI/API 默认值 */
+    public static final int DEFAULT_VIDEO_BITRATE = 4_000_000;
     /** 默认分段阈值 20MB(20*1024*1024 字节)，启用分段后单文件超过此大小自动切片 */
     public static final long DEFAULT_SEGMENT_SIZE_BYTES = 20L * 1024 * 1024;
+    /** 默认视频编码 H.264，兼容性最好 */
+    public static final VideoCodec DEFAULT_VIDEO_CODEC = VideoCodec.H264;
 
     /** 帧率(fps) */
     private int fps = DEFAULT_FPS;
@@ -36,6 +38,8 @@ public class RecorderConfig {
     private boolean segmentEnabled = false;
     /** 分段阈值(字节)，segmentEnabled=true 时生效，默认 20MB */
     private long segmentSizeBytes = DEFAULT_SEGMENT_SIZE_BYTES;
+    /** 视频编码格式，默认 H.264(libx264)，可选 H.265(libx265) */
+    private VideoCodec videoCodec = DEFAULT_VIDEO_CODEC;
 
     /** 默认构造器：输出文件采用带时间戳的默认路径 */
     public RecorderConfig() {
@@ -178,6 +182,27 @@ public class RecorderConfig {
         return this;
     }
 
+    /** 获取视频编码格式，默认 {@link VideoCodec#H264} */
+    public VideoCodec getVideoCodec() {
+        return videoCodec;
+    }
+
+    /**
+     * 设置视频编码格式。
+     * <p>选择 H.265 前建议先通过运行期能力探测确认 FFmpeg 内置 libx265。
+     *
+     * @param videoCodec 视频编码枚举，不可为 null
+     * @return 当前配置对象（链式调用）
+     * @throws IllegalArgumentException 当 videoCodec 为 null
+     */
+    public RecorderConfig setVideoCodec(VideoCodec videoCodec) {
+        if (videoCodec == null) {
+            throw new IllegalArgumentException("videoCodec 不能为空，可选: h264 / h265");
+        }
+        this.videoCodec = videoCodec;
+        return this;
+    }
+
     /** 计算实际录制区域：未指定则取主屏幕全屏 */
     public Rectangle resolveCaptureArea() {
         if (captureArea != null) {
@@ -273,11 +298,12 @@ public class RecorderConfig {
         }
     }
 
-    /** 输出配置摘要字符串，包含帧率/分辨率/码率/输出路径/端口/分段 */
+    /** 输出配置摘要字符串，包含编码/帧率/分辨率/码率/输出路径/端口/分段 */
     @Override
     public String toString() {
         Rectangle a = resolveCaptureArea();
-        return "RecorderConfig{fps=" + fps
+        return "RecorderConfig{codec=" + videoCodec.getDisplayName()
+                + ", fps=" + fps
                 + ", area=" + a.width + "x" + a.height
                 + ", bitrate=" + videoBitrate + "bps"
                 + ", output=" + (outputFile == null ? "null" : outputFile.getAbsolutePath())

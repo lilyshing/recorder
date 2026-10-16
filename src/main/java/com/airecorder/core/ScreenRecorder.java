@@ -1,6 +1,7 @@
 package com.airecorder.core;
 
 import com.airecorder.config.RecorderConfig;
+import com.airecorder.config.VideoCodec;
 import org.bytedeco.javacv.FFmpegFrameRecorder;
 import org.bytedeco.javacv.Frame;
 import org.bytedeco.javacv.Java2DFrameConverter;
@@ -16,7 +17,7 @@ import java.io.File;
 /**
  * 屏幕录制核心实现。
  * 采集：java.awt.Robot 截屏
- * 编码：JavaCV 的 FFmpegFrameRecorder，输出 MP4(H.264)
+ * 编码：JavaCV 的 FFmpegFrameRecorder，输出 MP4，支持 H.264(libx264)/H.265(libx265) 可选
  *
  * 状态机由 synchronized 块守护，录制在工作线程中循环采集+编码。
  */
@@ -52,6 +53,8 @@ public class ScreenRecorder implements RecorderService {
     private volatile int segmentIndex = 0;
     /** 当前正在写入的段文件，分段轮转时切换 */
     private volatile File currentSegmentFile;
+    /** 本次录制实际选中的 FFmpeg 编码器名(能力探测选出)，分段轮转时必须保持一致 */
+    private volatile String activeEncoderName;
 
     /**
      * 以给定配置开始录制。
@@ -59,7 +62,8 @@ public class ScreenRecorder implements RecorderService {
      *
      * @param config 录制配置，不可为 null
      * @throws IllegalArgumentException 当 config 为 null
-     * @throws IllegalStateException 当前状态不允许 start，或处于 headless 环境，或创建 Robot 失败
+     * @throws IllegalStateException 当前状态不允许 start、处于 headless 环境、创建 Robot 失败，
+     *                               或所选编码器(如 H.265/libx265)在当前 FFmpeg 环境不可用
      * @throws org.bytedeco.javacv.FrameRecorder.Exception FFmpeg 编码器启动失败
      */
     @Override
@@ -71,6 +75,19 @@ public class ScreenRecorder implements RecorderService {
             if (state != RecorderState.IDLE && state != RecorderState.ERROR) {
                 throw new IllegalStateException("当前状态 " + state + " 不允许 start，需先 stop");
             }
+            // 编码能力前置校验：对候选编码器做运行期试打开，选出真实可用者；
+            // 全部不可用(如本机无 libx265 且无 HEVC 硬编码/扩展)时直接拒绝并给出可操作提示
+            VideoCodec codec = config.getVideoCodec();
+            String encoderName = CodecSupport.resolveEncoder(codec);
+            if (encoderName == null) {
+                throw new IllegalStateException("当前运行环境没有可用的 " + codec.getDisplayName()
+                        + " 编码器，已尝试: " + String.join(", ", codec.getCandidates())
+                        + (codec == VideoCodec.H265
+                                ? "。请改用 H.264；若确需 H.265，请在带 NVIDIA/Intel 硬编码的设备上运行、"
+                                  + "安装 HEVC 视频扩展，或更换内置 libx265 的 FFmpeg 构建"
+                                : "。请检查 FFmpeg 原生库是否完整"));
+            }
+            this.activeEncoderName = encoderName;
             if (GraphicsEnvironment.isHeadless()) {
                 throw new IllegalStateException("当前环境为 headless，无法进行屏幕截取");
             }
@@ -91,17 +108,8 @@ public class ScreenRecorder implements RecorderService {
                 parent.mkdirs();
             }
 
-            // 初始化 FFmpeg 录制器
-            recorder = new FFmpegFrameRecorder(out, area.width, area.height);
-            recorder.setFormat("mp4");
-            // 优先 H.264；若 ffmpeg 构建未含 libx264，FFmpeg 会自动回退 mpeg4
-            recorder.setVideoCodecName("libx264");
-            recorder.setFrameRate(config.getFps());
-            // 设置码率(ABR)，对 libx264/mpeg4 均生效，保证清晰度
-            recorder.setVideoBitrate(config.getVideoBitrate());
-            // 输出 yuv420p 保证播放器兼容；preset 加速编码(libx264 生效，回退 mpeg4 时忽略)
-            recorder.setVideoOption("pix_fmt", "yuv420p");
-            recorder.setVideoOption("preset", "veryfast");
+            // 初始化 FFmpeg 录制器（编码参数按配置统一应用，分段轮转时复用同一套逻辑）
+            recorder = createRecorder(out, config);
             recorder.start();
 
             converter = new Java2DFrameConverter();
@@ -123,7 +131,8 @@ public class ScreenRecorder implements RecorderService {
             captureThread.start();
 
             System.out.println("[Recorder] 开始录制 -> " + out.getAbsolutePath()
-                    + " (" + area.width + "x" + area.height + "@" + config.getFps() + "fps)");
+                    + " (" + area.width + "x" + area.height + "@" + config.getFps()
+                    + "fps, " + codec.getDisplayName() + "/" + encoderName + ")");
         }
     }
 
@@ -323,15 +332,8 @@ public class ScreenRecorder implements RecorderService {
         segmentIndex++;
         File newFile = new File(parent, base + "_" + segmentIndex + ext);
 
-        // 3. 用相同编码参数初始化新 recorder
-        Rectangle area = currentConfig.resolveCaptureArea();
-        FFmpegFrameRecorder newRecorder = new FFmpegFrameRecorder(newFile, area.width, area.height);
-        newRecorder.setFormat("mp4");
-        newRecorder.setVideoCodecName("libx264");
-        newRecorder.setFrameRate(currentConfig.getFps());
-        newRecorder.setVideoBitrate(currentConfig.getVideoBitrate());
-        newRecorder.setVideoOption("pix_fmt", "yuv420p");
-        newRecorder.setVideoOption("preset", "veryfast");
+        // 3. 用与首段相同的编码参数初始化新 recorder（保证各段编码格式一致）
+        FFmpegFrameRecorder newRecorder = createRecorder(newFile, currentConfig);
         try {
             newRecorder.start();
         } catch (org.bytedeco.javacv.FrameRecorder.Exception e) {
@@ -346,6 +348,44 @@ public class ScreenRecorder implements RecorderService {
         lastOutputFile = newFile;
         System.out.println("[Recorder] 分段切换 -> " + newFile.getAbsolutePath()
                 + " (上一段 " + oldSize + " bytes)");
+    }
+
+    /**
+     * 按配置创建 FFmpeg 录制器并应用统一的编码参数。
+     * <p>首段录制与分段轮转共用此方法，确保各段编码格式/码率/像素格式完全一致。
+     * <ul>
+     *   <li>通用：mp4 封装、配置帧率/码率、yuv420p 像素格式(播放器兼容性)</li>
+     *   <li>libx264/libx265：veryfast 预设降低编码时延，适配实时屏幕录制；
+     *       libx265 额外设置 x265-params 抑制冗余日志，MP4 中 HEVC 默认打 hvc1 tag</li>
+     *   <li>libopenh264/h264_mf/hevc_mf/nvenc/qsv：不设置 x264/x265 私有参数(编码器无法识别)</li>
+     * </ul>
+     * 编码器名取自能力探测结果 {@link #activeEncoderName}，保证是当前环境真实可打开者，
+     * 杜绝 FFmpegFrameRecorder 在编码器缺失时静默回退到 mpeg4。
+     *
+     * @param out    输出 MP4 文件
+     * @param config 录制配置
+     * @return 已配置但尚未 start 的 FFmpegFrameRecorder
+     */
+    private FFmpegFrameRecorder createRecorder(File out, RecorderConfig config) {
+        Rectangle area = config.resolveCaptureArea();
+        FFmpegFrameRecorder r = new FFmpegFrameRecorder(out, area.width, area.height);
+        r.setFormat("mp4");
+        // 使用探测选中的真实编码器名，禁止静默回退
+        r.setVideoCodecName(activeEncoderName);
+        r.setFrameRate(config.getFps());
+        // 设置码率(ABR)，软件/硬件编码器均生效，保证清晰度
+        r.setVideoBitrate(config.getVideoBitrate());
+        // 输出 yuv420p 保证播放器兼容
+        r.setVideoOption("pix_fmt", "yuv420p");
+        // preset 仅 x264/x265 可识别；veryfast 降低编码时延以适配实时屏幕录制
+        if ("libx264".equals(activeEncoderName) || "libx265".equals(activeEncoderName)) {
+            r.setVideoOption("preset", "veryfast");
+        }
+        if ("libx265".equals(activeEncoderName)) {
+            // 屏蔽 x265 默认输出的大量参数级控制台日志
+            r.setVideoOption("x265-params", "log-level=error");
+        }
+        return r;
     }
 
     /**

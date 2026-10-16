@@ -2,6 +2,8 @@ package com.airecorder.cli;
 
 import com.airecorder.api.HttpApiServer;
 import com.airecorder.config.RecorderConfig;
+import com.airecorder.config.VideoCodec;
+import com.airecorder.core.CodecSupport;
 import com.airecorder.core.RecorderService;
 import com.airecorder.core.ScreenRecorder;
 
@@ -18,7 +20,7 @@ import java.util.Map;
  * 命令行启动器（无界面模式）。
  *
  * 用法：
- *   java -jar recorder.jar start [--fps N] [--resolution WxH] [--output <path>] [--port N]
+ *   java -jar recorder.jar start [--fps N] [--codec h264|h265] [--resolution WxH] [--output <path>] [--port N]
  *        启动后台录制进程，同时暴露 HTTP API，可被 stop 命令或外部模块调用停止。
  *   java -jar recorder.jar stop   [--port N]
  *        通过 HTTP API 停止本地正在运行的录制进程。
@@ -78,6 +80,23 @@ public class CliLauncher {
         Map<String, String> opts = parseOptions(args, 1);
         RecorderConfig config = buildConfig(opts);
         int port = parseInt(opts.get("port"), DEFAULT_PORT);
+
+        // 编码能力前置校验：对候选编码器做运行期试打开；全部不可用(如无 libx265 且无 HEVC 硬编码)
+        // 时明确提示并退出，不进入录制流程，也避免 FFmpeg 静默回退到 mpeg4
+        VideoCodec codec = config.getVideoCodec();
+        String encoderName = CodecSupport.resolveEncoder(codec);
+        if (encoderName == null) {
+            System.err.println("[CLI] 当前运行环境没有可用的 " + codec.getDisplayName()
+                    + " 编码器，已尝试: " + String.join(", ", codec.getCandidates()));
+            if (codec == VideoCodec.H265) {
+                System.err.println("[CLI] 请使用 --codec h264；若确需 H.265，请在带 NVIDIA/Intel 硬编码的设备上运行、"
+                        + "安装 HEVC 视频扩展，或更换内置 libx265 的 FFmpeg 构建。");
+            } else {
+                System.err.println("[CLI] 请检查 FFmpeg 原生库是否完整。");
+            }
+            return 2;
+        }
+        System.out.println("[CLI] " + codec.getDisplayName() + " 编码器: " + encoderName);
 
         RecorderService service = new ScreenRecorder();
         HttpApiServer api = new HttpApiServer(service, port);
@@ -173,6 +192,10 @@ public class CliLauncher {
         if (opts.containsKey("bitrate")) {
             config.setVideoBitrate(RecorderConfig.parseBitrate(opts.get("bitrate")));
         }
+        // 视频编码：h264(默认)/h265，支持 h.264/h.265/hevc/libx265 等写法
+        if (opts.containsKey("codec")) {
+            config.setVideoCodec(VideoCodec.parse(opts.get("codec")));
+        }
         // 自动分段开关与阈值
         if (opts.containsKey("segment")) {
             config.setSegmentEnabled(Boolean.parseBoolean(opts.get("segment")));
@@ -260,6 +283,7 @@ public class CliLauncher {
         System.out.println("");
         System.out.println("start 选项:");
         System.out.println("  --fps <N>            帧率，默认 " + RecorderConfig.DEFAULT_FPS);
+        System.out.println("  --codec <h264|h265>  视频编码，默认 h264；h265 需 FFmpeg 内置 libx265");
         System.out.println("  --resolution <WxH>   分辨率，如 1920x1080，默认屏幕分辨率");
         System.out.println("  --output <path>      输出 mp4 文件路径，默认当前目录");
         System.out.println("  --bitrate <V>        视频码率，如 8M/8000k/8000000，默认 8M");
@@ -268,7 +292,8 @@ public class CliLauncher {
         System.out.println("  --port <N>           HTTP API 端口，默认 " + DEFAULT_PORT);
         System.out.println("");
         System.out.println("HTTP API (无界面模式启动后可用):");
-        System.out.println("  POST /api/recorder/start?fps=30&width=1920&height=1080&output=<path>");
+        System.out.println("  POST /api/recorder/start?fps=30&codec=h265&width=1920&height=1080&output=<path>");
+        System.out.println("  GET  /api/recorder/capabilities  查询本机支持的视频编码");
         System.out.println("  POST /api/recorder/pause");
         System.out.println("  POST /api/recorder/resume");
         System.out.println("  POST /api/recorder/stop");
